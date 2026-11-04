@@ -3,6 +3,8 @@
 FastMCP Gateway runs this file. Its entrypoint setting is `server.py:mcp`.
 """
 
+import logging
+import re
 from collections import Counter, defaultdict
 from statistics import median
 
@@ -10,8 +12,21 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
 from sf311.data import BY_ID, LOCAL_NAMES, NEIGHBORHOODS, REQUESTS, SERVICES, closest
+from sf311.kit import caller_email
 
 mcp = FastMCP("sf-311")
+logger = logging.getLogger("sf311")
+
+HOUSE_NUMBER = re.compile(r"^(\d+)\s+([^,]+)")
+
+
+def _public_row(request) -> dict:
+    """Request as a dict with the address reduced to the block."""
+    row = request.as_dict()
+    match = HOUSE_NUMBER.match(row["address"])
+    if match:
+        row["address"] = f"{int(match.group(1)) // 100 * 100} block of {match.group(2).strip()}"
+    return row
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -84,7 +99,7 @@ def search_requests(
 
     Returns up to `limit` requests (1 to 50, default 20) with request_id, opened,
     closed, status, service, subtype, agency, neighborhood, local_name, address
-    and source. Filter by exact `service` and `neighborhood` names from
+    (masked to the block, e.g. "900 block of HARRISON ST") and source. Filter by exact `service` and `neighborhood` names from
     dataset_info, and by `status` ("Open" or "Closed"); all filters are optional.
 
     Do not use this to count or rank: it returns at most 50 rows, so use
@@ -94,7 +109,7 @@ def search_requests(
     if not 1 <= limit <= MAX_ROWS:
         raise ToolError(f"limit must be between 1 and {MAX_ROWS}. To count more than {MAX_ROWS} requests, use count_requests.")
     rows = sorted(_matching(service, neighborhood, status), key=lambda r: r.opened, reverse=True)
-    return [r.as_dict() for r in rows[:limit]]
+    return [_public_row(r) for r in rows[:limit]]
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -159,6 +174,8 @@ def median_close_hours(
 def get_request(request_id: str) -> dict:
     """Fetch one 311 request by its request_id, with all its fields.
 
+    The address is masked to the block. Each call is logged with the caller.
+
     Use this when you already have an id (for example from search_requests).
     To find requests by service or neighborhood use search_requests; to count
     them use count_requests.
@@ -166,7 +183,8 @@ def get_request(request_id: str) -> dict:
     request = BY_ID.get(request_id)
     if request is None:
         raise ToolError(f"No request with id {request_id!r}. Use search_requests to find valid request_ids.")
-    return request.as_dict()
+    logger.info("get_request %s by %s", request_id, caller_email() or "local")
+    return _public_row(request)
 
 
 if __name__ == "__main__":
